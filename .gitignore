@@ -235,3 +235,9 @@ checkpoints/
 
 # Local project tooling
 .env.*
+
+# Ignore nested datasets while retaining directory placeholders.
+data/raw/**
+data/processed/**
+!data/raw/.gitkeep
+!data/processed/.gitkeep
