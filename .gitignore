@@ -218,3 +218,20 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project data, models, and generated outputs
+data/*
+!data/raw/
+!data/processed/
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+outputs/*
+!outputs/.gitkeep
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+
+# Local project tooling
+.env.*

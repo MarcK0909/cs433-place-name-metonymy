@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cs433-place-name-metonymy"
+version = "0.1.0"
+description = "EPFL CS-433 project on binary place-name metonymy classification."
+requires-python = ">=3.10"
+dependencies = [
+    "pandas",
+    "scikit-learn",
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
