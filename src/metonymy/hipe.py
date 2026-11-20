@@ -106,9 +106,12 @@ def parse_documents(lines: Iterable[str], *, source_path: str = "<stream>") -> I
         raise HipeParsingError(f"{source_path}: metadata block without tokens")
 
 
-def _spans(document: HipeDocument, column: str) -> list[tuple[int, int, str]]:
+def _spans(
+    document: HipeDocument, column: str, review_issues: list[dict] | None = None,
+) -> list[tuple[int, int, str]]:
     spans = []
     start, entity_type = 0, None
+    orphan_issue = None
     for index in range(len(document.tokens) + 1):
         tag = document.tokens[index][column] if index < len(document.tokens) else "O"
         match = re.fullmatch(r"([BI])-([A-Za-z][A-Za-z0-9_.-]*)", tag)
@@ -117,8 +120,27 @@ def _spans(document: HipeDocument, column: str) -> list[tuple[int, int, str]]:
                                    f"token {index}, {column}: invalid BIO tag {tag!r}")
         prefix, current_type = match.groups() if match else ("O", None)
         if prefix == "I" and current_type != entity_type:
-            raise HipeParsingError(f"{document.source_path}: document {document.document_id}, "
-                                   f"token {index}, {column}: malformed BIO continuation {tag!r}")
+            if review_issues is None:
+                raise HipeParsingError(f"{document.source_path}: document {document.document_id}, "
+                                       f"token {index}, {column}: malformed BIO continuation {tag!r}")
+            # Audit only: retain the preceding typed span, but never invent a B
+            # tag or a new entity for an orphan I run. Preserve the run for review.
+            if entity_type is not None:
+                spans.append((start, index, entity_type))
+            entity_type = None
+            if orphan_issue is None or orphan_issue["tag"] != tag:
+                orphan_issue = {
+                    "document_id": document.document_id, "column": column, "tag": tag,
+                    "source_token_start": index, "source_token_end": index,
+                    "source_line_numbers": [], "source_annotations": [],
+                    "reason": "orphan/type-changing I run; not promoted to an entity",
+                }
+                review_issues.append(orphan_issue)
+            orphan_issue["source_token_end"] = index + 1
+            orphan_issue["source_line_numbers"].append(document.source_lines[index])
+            orphan_issue["source_annotations"].append(dict(document.tokens[index]))
+            continue
+        orphan_issue = None
         if prefix != "I":
             if entity_type is not None:
                 spans.append((start, index, entity_type))
@@ -127,12 +149,19 @@ def _spans(document: HipeDocument, column: str) -> list[tuple[int, int, str]]:
     return spans
 
 
-def extract_mentions(document: HipeDocument, *, language: str, split: str) -> list[dict]:
+def extract_mentions(
+    document: HipeDocument, *, language: str, split: str,
+    review_issues: list[dict] | None = None,
+) -> list[dict]:
     """Extract complete source locations with exactly aligned binary labels.
 
     A contextual entity of any syntactically valid type (including loc) means
     METONYMIC. Any overlap must be one span with exactly the source boundaries.
     Language and split are explicit provenance, never inferred from filenames.
+    Supplying review_issues explicitly enables candidate-only audit extraction:
+    malformed I runs are logged and not promoted to entities. Adjacent/overlapping
+    candidates carry annotation_issues and require review. Default remains strict;
+    invalid tags and METO misalignment always raise, including in audit mode.
     """
     if not language.strip() or not split.strip():
         raise HipeParsingError("language and split must be nonempty")
@@ -140,12 +169,19 @@ def extract_mentions(document: HipeDocument, *, language: str, split: str) -> li
         actual = document.metadata.get(key)
         if actual is not None and actual != expected:
             raise HipeParsingError(f"{document.document_id}: {key}={actual!r}, expected {expected!r}")
-    literal = _spans(document, "NE-COARSE-LIT")
-    contextual = _spans(document, "NE-COARSE-METO")
+    local_issues = [] if review_issues is not None else None
+    literal = _spans(document, "NE-COARSE-LIT", local_issues)
+    contextual = _spans(document, "NE-COARSE-METO", local_issues)
+    if review_issues is not None:
+        review_issues.extend(local_issues)
     mentions = []
     for start, end, source_type in literal:
         if source_type != "loc":
             continue
+        if any(issue["column"] == "NE-COARSE-METO"
+               and issue["source_token_start"] < end and issue["source_token_end"] > start
+               for issue in (local_issues or [])):
+            raise HipeParsingError(f"{document.document_id}: location [{start}:{end}] overlaps malformed METO")
         overlapping = [(a, b, kind) for a, b, kind in contextual if a < end and b > start]
         if overlapping and (len(overlapping) != 1 or overlapping[0][:2] != (start, end)):
             raise HipeParsingError(f"{document.source_path}: document {document.document_id}, "
@@ -175,6 +211,10 @@ def extract_mentions(document: HipeDocument, *, language: str, split: str) -> li
             "contextual_type": contextual_type, "partial": partial,
             "source_annotations": [dict(row) for row in rows],
             "document_metadata": dict(document.metadata),
+            **({"annotation_issues": [issue for issue in local_issues
+                                      if issue["source_token_start"] <= end
+                                      and issue["source_token_end"] >= start]}
+               if local_issues is not None else {}),
         })
     return mentions
 

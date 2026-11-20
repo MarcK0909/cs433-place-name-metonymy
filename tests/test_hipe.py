@@ -144,3 +144,49 @@ def test_tabbed_metadata_and_hash_token():
     result, = extract_mentions(doc, language="fr", split="dev")
     assert result["source_token_start"] == 1
     assert doc.tokens[0]["TOKEN"] == "#"
+
+
+@pytest.mark.parametrize("word,meto,tail,label", [
+    ("France", "O", "org", "LITERAL"),
+    ("Frankreichs", "B-pers", "pers", "METONYMIC"),
+])
+def test_explicit_review_preserves_source_candidate(word, meto, tail, label):
+    from copy import deepcopy
+
+    doc = document([(word, "B-loc", meto, "B-org", "_"),
+                    ("following", f"I-{tail}", "O", "O", "_"),
+                    ("words", f"I-{tail}", "O", "O", "_"),
+                    ("Paris", "B-loc", "O", "O", "Partial-0:4")])
+    before = deepcopy(doc)
+    with pytest.raises(HipeParsingError, match="malformed BIO"):
+        extract_mentions(doc, language="fr", split="train")
+    issues = []
+    rows = extract_mentions(doc, language="fr", split="train", review_issues=issues)
+    assert doc == before
+    assert [r["mention"] for r in rows] == [word, "Paris"]
+    assert rows[0]["label_name"] == label
+    assert rows[0]["source_token_end"] == 1
+    assert rows[0]["annotation_issues"] == issues
+    assert len(issues) == 1
+    assert (issues[0]["source_token_start"], issues[0]["source_token_end"]) == (1, 3)
+    assert rows[1]["partial"]  # Not filtered or sliced.
+
+
+def test_review_does_not_turn_orphan_meto_into_literal():
+    doc = document([("Paris", "B-loc", "I-org", "O", "_")])
+    with pytest.raises(HipeParsingError, match="malformed METO"):
+        extract_mentions(doc, language="fr", split="train", review_issues=[])
+
+
+def test_review_still_rejects_misalignment():
+    doc = document([("New", "B-loc", "B-org", "O", "_"),
+                    ("York", "I-loc", "O", "O", "_")])
+    with pytest.raises(HipeParsingError, match="misaligned METO"):
+        extract_mentions(doc, language="fr", split="train", review_issues=[])
+
+
+def test_review_does_not_promote_orphan_location():
+    doc = document([("Paris", "I-loc", "O", "O", "_")])
+    issues = []
+    assert extract_mentions(doc, language="fr", split="train", review_issues=issues) == []
+    assert len(issues) == 1
