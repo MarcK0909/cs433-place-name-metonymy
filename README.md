@@ -31,19 +31,32 @@ editable install by using `PYTHONPATH=src`.
 
 ## Data and current availability
 
-At implementation time, `data/raw/` and `data/processed/` contain only `.gitkeep`.
-**No TRAIN, DEV, or TEST data are available**: class distributions and research
-baseline scores cannot yet be reported. No data were downloaded or synthesized
-for experiments. Synthetic records are used only in tests.
+The project uses **raw HIPE-2022 v2.1, dataset `hipe2020`**, with **French and
+German** as the main languages. The local source is
+`data/raw/HIPE-2022-data/`, pinned to revision
+`2439cb5cfbcd7b65aff6a25b7715398f8f85e034`. Raw data remain unchanged and gitignored.
+The Batch 2 count audit is described below.
 
-Put supervisor-provided files under these directories; datasets and generated
-outputs are gitignored. Original files must remain unchanged. Use the official
-project split assignments; the tools never create or infer splits. CLI paths
-explicitly identify split roles, and the user must verify their provenance.
-English (`--language en`) is the default for the first baseline. This is a planned
-language choice, not an observation about the missing data. Other languages
-require an explicit flag and are never mixed within a run. Language codes match
-exactly; the inspector reports available languages and excluded row counts.
+Batch 1 adds `metonymy.hipe.load_hipe_mentions(path, language="fr", split="train")`
+as a separate raw parsing path. It extracts complete `NE-COARSE-LIT` location
+spans, labels all-O aligned METO spans LITERAL and fully aligned contextual
+entities METONYMIC (including loc → loc), and rejects malformed BIO or misaligned
+spans. Returned records preserve document metadata, source rows/line numbers,
+zero-based end-exclusive document token boundaries, and stable IDs. They do not
+yet contain model context `text` and are not inputs to the prepared-data baseline.
+`parse_documents` also exposes all document rows and comments for later inspection.
+Callers must verify the source version and explicitly supply language and split.
+
+Mention reconstruction respects `NoSpaceAfter`. Partial flags are preserved
+verbatim without exclusion or character slicing; `mention` retains the complete
+source-token surface. Nested annotations are retained but never add targets.
+Upstream documentation warns of erroneous Partial offsets. Its statement that
+no training set exists conflicts with the supplied TRAIN filenames; resolve
+split provenance during Batch 2 before experiments.
+
+The prepared-data loader and CLI defaults remain unchanged (including `en`);
+they are not yet adapted to the French/German raw-data workflow. They never
+create splits or mix languages within a run.
 
 ### Prepared mention-level input contract
 
@@ -77,11 +90,8 @@ records fail baseline loading with a row-level error. Inspection reports them
 without changing source files; statistics explicitly cover valid selected-language
 rows, with total input, invalid, and other-language counts also shown.
 
-Raw HIPE extraction is deliberately not implemented because no raw HIPE files
-were supplied. A token TSV is not accepted as prepared mention-level input. If
-raw data arrive, first inspect column values, IOB spans, document/sentence
-boundaries, and spacing metadata, then confirm the place-name and metonymy
-annotation semantics with supervisors before implementing a separate parser.
+Raw HIPE files use the separate `metonymy.hipe` parser described above; the
+prepared-data loader continues to reject token TSV input.
 
 ## Commands
 
@@ -91,8 +101,7 @@ Inventory the currently available data (works with empty directories):
 PYTHONPATH=src python scripts/inspect_data.py --data-dir data
 ```
 
-Once prepared official splits exist (replace these illustrative paths with their
-actual filenames):
+Legacy prepared-data commands (illustrative paths, not the raw HIPE workflow):
 
 ```bash
 PYTHONPATH=src python scripts/inspect_data.py --train data/processed/train.jsonl --dev data/processed/dev.jsonl --language en
@@ -135,10 +144,63 @@ predicted classes, ordered LITERAL, METONYMIC.
   stop the baseline. No missing split is fabricated, no labels are manually
   revised, and no raw data are modified.
 
-Before conducting an experiment, ask supervisors for the official split files,
-the designated first language, and either the prepared schema/target encoding
-or documented HIPE label semantics and context boundaries. No annotation
-interpretation has been assumed in the absence of those files.
+Before experiments, review the Batch 2 audit findings and confirm split provenance
+and Partial-offset treatment. Batch 1 uses the explicitly supplied target/label rules
+and does not run baseline experiments on raw HIPE data.
+
+## Batch 2 — pinned French/German count audit
+
+```bash
+python scripts/audit_hipe.py
+python -m pytest -q
+HIPE_REAL_DATA_TESTS=1 python -m pytest -q tests/integration/test_hipe_counts.py
+```
+
+The audit reads only the unmasked `train`, `dev`, and `test` TSVs under
+`data/raw/HIPE-2022-data/data/v2.1/hipe2020/{fr,de}/`. It verifies both the checkout
+revision and each file's bytes against that revision. `--data-root` and `--output`
+are configurable; the detailed JSON defaults to ignored
+`outputs/audits/hipe_counts.json`. No splits or source annotations are changed.
+TEST is inspected only for counts, not for model selection or experiments.
+
+| Language | Split | LITERAL | METONYMIC | Total |
+|---|---|---:|---:|---:|
+| fr | train | 2644 | 445 | 3089 |
+| fr | dev | 670 | 104 | 774 |
+| fr | test | 743 | 111 | 854 |
+| de | train | 1415 | 325 | 1740 |
+| de | dev | 501 | 87 | 588 |
+| de | test | 477 | 118 | 595 |
+| combined | train | 4059 | 770 | 4829 |
+| combined | dev | 1171 | 191 | 1362 |
+| combined | test | 1220 | 229 | 1449 |
+
+All workbench counts match **audit candidates**, including two flagged TRAIN
+mentions. Strict extraction remains unchanged and rejects their documents:
+
+- French `GDL-1948-04-15-a-i0035`: token 1461 `France` is `B-loc` with METO `O`;
+  token 1462 `moderne` is the inconsistent `I-org`. Source lines 135786–135787.
+  The flagged candidate `[1461:1462]` is LITERAL by the supplied METO rule.
+- German `luxwort-1938-05-20-a-i0023`: token 26 `Frankreichs` is `B-loc` with
+  METO `B-pers`; tokens `[27:31]` (`größten Außenminister Deleass .`) are
+  inconsistent `I-pers` continuations. Source lines 82459–82463. The flagged
+  candidate `[26:27]` is METONYMIC by the supplied aligned METO rule.
+
+Smallest audit-only handling: explicitly pass a `review_issues` list to
+`extract_mentions`, retain the source `B-loc` span ending before the type change,
+and log the malformed I run without promoting it to a new entity or changing
+any tags. Adjacent candidates retain `annotation_issues`. Default parsing still
+raises. Invalid tags, METO overlap with a malformed run, and span misalignment
+remain errors even in audit mode. Partial examples remain included, with offsets
+unchanged; nested annotations never add targets. Neither known case is Partial.
+
+The JSON separates strict counts from candidate counts and records source rows,
+line numbers, hashes, and review issues. Strict successful-document-only counts
+are fr TRAIN 2639/440 and de TRAIN 1412/320 (LITERAL/METONYMIC); these are incomplete,
+not alternative dataset totals. All DEV/TEST files pass strict extraction.
+Matching counts does not resolve the malformed annotations: manually review both
+flagged candidates before adopting an experimental inclusion policy. The audit
+writes no model-ready dataset and does not alter baseline behavior.
 
 ## Next steps
 
