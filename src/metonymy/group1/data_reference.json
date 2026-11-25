@@ -1,0 +1,30 @@
+{
+  "upstream_repository": "https://github.com/impresso/impresso-metonymy-workbench",
+  "upstream_commit": "d5234ba3110b55101111685e0df9da521ba2c0d7",
+  "reference_config": "group1/results/runs/encoder_mmBERT-base_hipe_fr_train+hipe_de_train_lr5e-05_ep20_mean_w64_seed42/config.json",
+  "hipe_revision": "2439cb5cfbcd7b65aff6a25b7715398f8f85e034",
+  "prepared_md5": {
+    "hipe_fr_train": "d2bc73e5bdb819fa6f7dd4f24164883f",
+    "hipe_de_train": "d9938bafea1b90643d25c625e2b93cc5",
+    "hipe_fr_dev": "085d866814efa9c5ec70178cfa0d14ba",
+    "hipe_de_dev": "5159207669893bef6db01c6ade18d2c8"
+  },
+  "counts": {
+    "hipe_fr_train": {
+      "literal": 2644,
+      "metonymic": 445
+    },
+    "hipe_de_train": {
+      "literal": 1415,
+      "metonymic": 325
+    },
+    "hipe_fr_dev": {
+      "literal": 670,
+      "metonymic": 104
+    },
+    "hipe_de_dev": {
+      "literal": 501,
+      "metonymic": 87
+    }
+  }
+}

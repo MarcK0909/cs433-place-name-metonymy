@@ -25,4 +25,4 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 
 [tool.setuptools.package-data]
-"metonymy.group1" = ["LICENSE", "NOTICE.md"]
+"metonymy.group1" = ["LICENSE", "NOTICE.md", "data_reference.json"]

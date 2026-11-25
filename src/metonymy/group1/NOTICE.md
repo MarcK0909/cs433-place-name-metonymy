@@ -22,3 +22,11 @@ Pooling, passage reconstruction, tokenization, shuffled batches, optimizer,
 learning-rate schedule, early stopping and prediction output follow upstream.
 The upstream scheduler behavior on skipped fp16 steps is retained for parity.
 No LLM code, results, newspaper text or model weights were imported.
+
+Prepared-data bridge batch:
+- prepare.py retains the HIPE-specific functions/constants from upstream
+  group1/scripts/prepare_data.py (not its download/English dataset workflow).
+- Added prepare_hipe_file validation against our strict parser; only the two
+  previously reviewed TRAIN anomalies may proceed. No source files are edited.
+- data_reference.json records four prepared-file MD5s from Group 1's pinned
+  seed-42, 64-token CE run configuration; no corpus text is included.
