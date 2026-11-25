@@ -13,6 +13,9 @@ dependencies = [
     "pytest",
 ]
 
+[project.optional-dependencies]
+contrastive = ["torch==2.9.1"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
