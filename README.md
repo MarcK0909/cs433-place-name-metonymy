@@ -349,6 +349,67 @@ establishes input parity, not reproduction of model scores. This batch runs no
 training or model download. The next step is the server environment and a short
 GPU smoke test once a GPU is allocated.
 
+## Server setup and one-step smoke test
+
+The setup script targets Group 1's Python 3.12 / PyTorch 2.9.1 CUDA 12.6 stack.
+It creates a separate `~/venvs/metonymy-group2` environment, installs this project
+and its pinned encoder dependencies, and runs the CPU tests offline. It does
+not download model weights or start GPU work. Override the environment location
+with `METONYMY_VENV` or Python executable with `METONYMY_PYTHON` if needed.
+
+To copy this batch from the Mac without checking out the branch, run from the
+repository root (only the named code/documentation paths are sent):
+
+```bash
+rsync -av --exclude '__pycache__' --exclude '*.egg-info' src scripts tests server pyproject.toml README.md kallergi@dhlabsrv1.epfl.ch:~/metonymy-group2-smoke/
+```
+
+On the server:
+
+```bash
+cd ~/metonymy-group2-smoke
+METONYMY_PYTHON=python3.12 bash server/setup_env.sh \
+  && source ~/venvs/metonymy-group2/bin/activate
+```
+
+Use the existing pinned HIPE checkout if it is already on the server, passing
+its path to `--data-root`. Otherwise obtain a separate copy once:
+
+```bash
+mkdir -p data/raw
+git clone https://github.com/hipe-eval/HIPE-2022-data.git data/raw/HIPE-2022-data
+git -C data/raw/HIPE-2022-data checkout 2439cb5cfbcd7b65aff6a25b7715398f8f85e034
+python scripts/prepare_encoder_data.py
+```
+
+Wait for a GPU allocation from the lab, and check `nvidia-smi` immediately before
+launching. GPU 1 is not assumed available. GPU 3 is reserved for services.
+After replacing `G` below with the allocated index (0, 1 or 2):
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=G python scripts/smoke_encoder.py --device cuda --supcon-weight 0 --output outputs/smoke/ce.json
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=G python scripts/smoke_encoder.py --device cuda --supcon-weight 0.1 --temperature 0.1 --output outputs/smoke/supcon.json
+```
+
+`0.1` here is a diagnostic value, not a selected experimental hyperparameter.
+Both commands use the same seeded random TRAIN sample (32 mentions), the shared
+64-token context rule, and one optimizer update. A missing class/positive
+partner in the sample is an explicit error, not silently repaired by sampling.
+The first run downloads mmBERT/tokenizer if uncached. `--model` can instead point
+to a local model directory. `--batch-size 4` is available for an explicitly
+smaller memory diagnostic, but may lack positive partners with this seed.
+
+The smoke checks loss, gradients, and an actual classifier update. It writes
+sample IDs, component losses, data hashes, resolved model revision when exposed
+by Transformers, timing, versions and memory usage. It writes no checkpoint,
+evaluates neither DEV nor TEST, and refuses to overwrite an existing report.
+Nonfinite fp16 gradients stop the test; `--no-fp16` is available for diagnosis.
+
+This is not yet a full training experiment. Confirm Group 1's model revision
+before comparing full runs. The rsynced smoke directory has no Git metadata;
+use a committed Git checkout for the later recorded experiments. Run commands
+sequentially, report their outputs, and wait to launch a multi-seed experiment.
+
 ## Next steps
 
 1. Standard mmBERT + cross-entropy baseline.

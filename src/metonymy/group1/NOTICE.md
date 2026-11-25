@@ -30,3 +30,7 @@ Prepared-data bridge batch:
   previously reviewed TRAIN anomalies may proceed. No source files are edited.
 - data_reference.json records four prepared-file MD5s from Group 1's pinned
   seed-42, 64-token CE run configuration; no corpus text is included.
+
+Server smoke batch:
+- smoke.py is a Group 2 one-step diagnostic using the adapted trainer, restricted
+  to TRAIN, with explicit GPU selection and no saved model or evaluation.

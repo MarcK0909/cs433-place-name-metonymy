@@ -184,3 +184,41 @@ def test_real_transformer_cpu_training_and_output(tmp_path, local_model_and_data
     assert {r["id"] for r in rows} == {r["id"] for r in examples}
     assert all(0 <= r["prob_metonymic"] <= 1 for r in rows)
     assert not list(output.glob("*test*"))
+
+
+@pytest.mark.parametrize("weight", [0., .2])
+def test_one_step_smoke_report(tmp_path, local_model_and_data, weight):
+    from metonymy.group1 import smoke
+
+    model_dir, data, _, _ = local_model_and_data
+    output = tmp_path / "smoke.json"
+    result = smoke.main(["--model", str(model_dir), "--data-dir", str(data),
+                         "--train", "hipe_fr_train", "--device", "cpu", "--batch-size", "8",
+                         "--supcon-weight", str(weight), "--temperature", ".1", "--output", str(output)])
+    assert result["optimizer_steps"] == 1
+    assert result["head_updated"]
+    assert result["diagnostic_only"]
+    assert result["class_counts"] == {"literal": 4, "metonymic": 4}
+    assert result["loss"] == pytest.approx(result["ce"] + weight * result["supcon"])
+    assert json.loads(output.read_text())["sample_ids"] == result["sample_ids"]
+    assert not list(tmp_path.glob("*.pt"))
+
+
+@pytest.mark.parametrize("visible", [None, "", "3", "0,1", "GPU-unknown"])
+def test_smoke_requires_one_allowed_gpu(monkeypatch, visible):
+    from metonymy.group1 import smoke
+
+    if visible is None:
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    else:
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
+    with pytest.raises(SystemExit):
+        smoke.parse_args(["--device", "cuda", "--supcon-weight", "0"])
+
+
+def test_smoke_rejects_dev_and_test_inputs():
+    from metonymy.group1 import smoke
+
+    for name in ("hipe_fr_dev", "hipe_fr_test"):
+        with pytest.raises(SystemExit):
+            smoke.parse_args(["--device", "cpu", "--supcon-weight", "0", "--train", name])
