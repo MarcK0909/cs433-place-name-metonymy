@@ -202,6 +202,44 @@ Matching counts does not resolve the malformed annotations: manually review both
 flagged candidates before adopting an experimental inclusion policy. The audit
 writes no model-ready dataset and does not alter baseline behavior.
 
+## Contrastive batch 1 — isolated loss, no training yet
+
+`src/metonymy/contrastive.py` implements `supervised_contrastive_loss` on a
+batch of pooled mention vectors and integer binary labels. It is independent
+of mmBERT and the data parser. The four steps in the code are:
+
+1. Identify other mentions with the same label (positive pairs).
+2. Normalize vectors to unit length and compute cosine similarities divided
+   by an explicit temperature.
+3. Compute log probabilities over all other mentions, excluding self-pairs.
+4. Average negative log probabilities over positives, then over anchors with
+   at least one positive.
+
+An anchor without a positive is omitted from this average; it can still be a
+negative comparison for other anchors. With no positive pairs anywhere, the
+loss is differentiable zero. No mentions are removed from the classification
+task. A single-class batch is allowed, although it supplies no negative pairs.
+No projection head, extra views, sampler changes, or model downloads are added.
+
+Later integration will use `CE + lambda * SupCon`, keeping the classifier's
+original pooled vectors and normalizing only for SupCon. Temperature and lambda
+are not selected by this batch. Compute the loss outside mixed-precision
+autocast; half-precision feature inputs are promoted to float32 internally.
+
+PyTorch is optional for the existing data pipeline. The `contrastive` extra pins
+`torch==2.9.1` to Group 1's version; the GPU build will be installed explicitly
+when setting up the server. Synthetic loss tests run with installed PyTorch
+and skip when it is absent:
+
+```bash
+python -m pytest -q tests/test_contrastive.py
+python -m pytest -q
+```
+
+These tests check a hand-computed loss, label separation, normalization,
+singleton/empty-positive behavior, numerical gradients, and invalid inputs.
+They require neither a pretrained model nor the real dataset.
+
 ## Next steps
 
 1. Standard mmBERT + cross-entropy baseline.
