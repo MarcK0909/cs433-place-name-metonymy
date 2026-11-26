@@ -7,7 +7,8 @@ License: GNU Affero General Public License v3, retained in LICENSE here.
 Original authors: the Impresso workbench / CS-433 Group 1 contributors.
 
 Copied from group1/scripts: common.py, passages.py, torch_utils.py,
-train_encoder.py. probe.py contains only fit_logistic from baselines.py.
+train_encoder.py. Unused upstream SemEval, statistical-comparison and writer
+helpers, and the frozen-encoder logistic-probe path have been removed.
 
 Group 2 modifications:
 - Package-relative imports; default paths relative to the working directory;

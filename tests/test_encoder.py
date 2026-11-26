@@ -115,7 +115,7 @@ def test_complete_ce_loop_matches_pinned_group1_reference():
 @pytest.mark.parametrize("extra", [
     ["--supcon-weight", "-1"], ["--supcon-weight", "nan"],
     ["--supcon-weight", ".1"], ["--temperature", "0"],
-    ["--supcon-weight", ".1", "--temperature", ".1", "--freeze-encoder"],
+    ["--freeze-encoder"],  # Removed optional probe mode must not silently run CE.
     ["--eval", "hipe_fr_test"], ["--dev", "hipe_fr_train"],
 ])
 def test_invalid_cli_rejected(extra):

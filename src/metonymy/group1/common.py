@@ -1,10 +1,8 @@
 """Shared helpers: file paths, readers for the raw files, the prepared data, scores and run logs."""
 import hashlib
 import json
-import math
 import os
 import platform
-import re
 import subprocess
 import sys
 import time
@@ -22,43 +20,6 @@ RESULTS = ROOT / "outputs"
 
 
 # ---------- Readers for the raw files ----------
-
-
-def attribute(name, text):
-    """Value of one XML attribute, or "-" when it is missing."""
-    match = re.search(name + r'="([^"]*)"', text)
-    return match.group(1) if match else "-"
-
-
-def read_semeval(path):
-    """Return {sample id: fields} of a SemEval XML file, in file order.
-
-    reading, metotype and notes are the original SemEval annotation. label is
-    the extra <label> element of SemEval.relabelled.xml ("-" in other files).
-    """
-    samples = {}
-    xml = path.read_text(encoding="iso-8859-1")
-    for sample_id, body in re.findall(
-        r'<sample id="([^"]+)"[^>]*>(.*?)</sample>', xml, re.S
-    ):
-        attributes, name = re.search(
-            r"<location([^>]*)>(.*?)</location>", body, re.S
-        ).groups()
-        label = re.search(r"<label>(.*?)</label>", body)
-        # Plain text with the place name marked, for showing examples.
-        text = re.sub(r"<bnc:title>.*?</bnc:title>", " ", body, flags=re.S)
-        text = re.sub(r"<label>.*?</label>", " ", text)
-        text = re.sub(r"<location[^>]*>(.*?)</location>", r"[[\1]]", text, flags=re.S)
-        text = " ".join(re.sub(r"<[^>]+>", " ", text).split())
-        samples[sample_id] = {
-            "name": name.strip(),
-            "reading": attribute("reading", attributes),
-            "metotype": attribute("metotype", attributes),
-            "notes": attribute("notes", attributes),
-            "label": label.group(1).lower() if label else "-",
-            "text": text,
-        }
-    return samples
 
 
 def read_hipe(path):
@@ -95,21 +56,10 @@ def spans(tags):
 # ---------- Prepared data (one JSON object per line) ----------
 
 
-def save_examples(examples, name):
-    PROCESSED.mkdir(parents=True, exist_ok=True)
-    with (PROCESSED / f"{name}.jsonl").open("w", encoding="utf-8") as file:
-        for example in examples:
-            file.write(json.dumps(example, ensure_ascii=False) + "\n")
-
-
 def load_examples(name, directory=None):
     """Load <directory>/<name>.jsonl (default data/processed), e.g. load_examples("relocar_train")."""
     with (Path(directory or PROCESSED) / f"{name}.jsonl").open(encoding="utf-8") as file:
         return [json.loads(line) for line in file]
-
-
-def target_name(example):
-    return " ".join(example["tokens"][example["start"] : example["end"]])
 
 
 # ---------- Scores ----------
@@ -134,46 +84,6 @@ def scores(labels, predictions):
         f1_values.append(f1)
     result["macro_f1"] = float(np.mean(f1_values))
     return result
-
-
-def bootstrap_interval(labels, predictions, groups, metric="macro_f1", n_samples=1000, seed=0):
-    """95% interval of a score, resampling whole groups (sentences or articles).
-
-    Mentions from the same group are not independent, so they are drawn together.
-    """
-    labels = np.asarray(labels)
-    predictions = np.asarray(predictions)
-    _, group_index = np.unique(np.asarray(groups), return_inverse=True)
-    members = [[] for _ in range(group_index.max() + 1)]
-    for row, group in enumerate(group_index):
-        members[group].append(row)
-    members = [np.array(rows) for rows in members]
-    rng = np.random.default_rng(seed)
-    values = []
-    for _ in range(n_samples):
-        chosen = rng.integers(len(members), size=len(members))
-        rows = np.concatenate([members[group] for group in chosen])
-        values.append(scores(labels[rows], predictions[rows])[metric])
-    low, high = np.percentile(values, [2.5, 97.5])
-    return float(low), float(high)
-
-
-def mcnemar_exact(labels, predictions_a, predictions_b):
-    """Exact two-sided McNemar test of two systems on the same mentions.
-
-    Returns (a_only, b_only, p): mentions only system A gets right, mentions only
-    system B gets right, and the p-value of the binomial test on these two counts.
-    """
-    labels = np.asarray(labels)
-    correct_a = np.asarray(predictions_a) == labels
-    correct_b = np.asarray(predictions_b) == labels
-    a_only = int(np.sum(correct_a & ~correct_b))
-    b_only = int(np.sum(~correct_a & correct_b))
-    n = a_only + b_only
-    if n == 0:
-        return a_only, b_only, 1.0
-    tail = sum(math.comb(n, k) for k in range(min(a_only, b_only) + 1)) / 2**n
-    return a_only, b_only, min(1.0, 2 * tail)
 
 
 # ---------- Run logs ----------

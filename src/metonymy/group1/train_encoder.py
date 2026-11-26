@@ -8,10 +8,6 @@ place name's representation gives the two classes. Loss: cross-entropy, optional
     marker         the text marks the name, "... de [[Paris]] a ...", and the
                    head reads the opening marker (an extra configuration)
 
-With --freeze-encoder this is the probe baseline of the lab slides instead:
-mmBERT is not trained, and an L2 logistic regression is fitted on its
-features (penalty chosen on dev).
-
 Default settings follow the lab's tuned mmBERT recipe for HIPE-2020 NER
 (impresso-ner-training, configs/training.yaml): learning rate 5e-5, cosine
 decay after 10% warm-up, batch 32, no weight decay, up to 20 epochs with
@@ -20,7 +16,6 @@ early stopping after 6 epochs without a better dev score, seeds 42, 123,
 
 Run from this repository root, on an allocated GPU (never GPU 3):
     CUDA_VISIBLE_DEVICES=1 python scripts/train_encoder.py --train hipe_fr_train hipe_de_train --dev hipe_fr_dev hipe_de_dev
-    CUDA_VISIBLE_DEVICES=1 python scripts/train_encoder.py --train hipe_fr_train hipe_de_train --dev hipe_fr_dev hipe_de_dev --freeze-encoder
 
 Results go to outputs/runs/<run name>/:
     config.json               all settings, versions, machine and data md5
@@ -36,7 +31,6 @@ import time
 from pathlib import Path
 
 import numpy as np
-from scipy.special import expit
 
 from . import common
 from .common import data_versions, load_examples, run_info, scores, write_json, write_jsonl
@@ -65,7 +59,6 @@ from metonymy.contrastive import supervised_contrastive_loss
 
 UPSTREAM_COMMIT = "d5234ba3110b55101111685e0df9da521ba2c0d7"
 
-PROBE_LAMBDAS = [1e-4, 1e-3, 1e-2, 1e-1, 1.0]
 SHORTER_WINDOWS = (96, 64, 48, 32, 16, 8, 4, 0)  # tried in order when a passage is too long
 
 
@@ -187,21 +180,6 @@ def predict(model, items, args, device, fp16, pad_id):
     return result
 
 
-@torch.no_grad()
-def extract_features(model, items, args, device, fp16, pad_id):
-    model.eval()
-    order = sorted(range(len(items)), key=lambda i: len(items[i]["input_ids"]))
-    features = None
-    for rows in batches(order, args.eval_batch_size):
-        batch = collate([items[i] for i in rows], pad_id, device)
-        with torch.autocast(device.type, dtype=torch.float16, enabled=fp16):
-            values = model.features(batch).float().cpu().numpy()
-        if features is None:
-            features = np.zeros((len(items), values.shape[1]), dtype=np.float32)
-        features[rows] = values
-    return features
-
-
 # ---------- Training ----------
 
 
@@ -310,24 +288,6 @@ def fine_tune(model, train_items, dev_items, args, device, fp16, pad_id):
     return history, best_epoch
 
 
-def fit_probe(train_x, train_y, dev_x, dev_y):
-    """L2 logistic regression on frozen features; the penalty is chosen on dev."""
-    from .probe import fit_logistic
-
-    mean, scale = train_x.mean(0), train_x.std(0) + 1e-6
-    standard = lambda x: (x - mean) / scale  # noqa: E731
-    best, history = None, []
-    for lambda_ in PROBE_LAMBDAS:
-        w = fit_logistic(standard(train_x), train_y, lambda_)
-        f1 = macro_f1(dev_y, expit(standard(dev_x) @ w[1:] + w[0]))
-        history.append({"lambda": lambda_, "dev_macro_f1": f1})
-        print(f"probe, lambda {lambda_:g}: dev macro-F1 {f1:.4f}")
-        if best is None or f1 > best[0]:
-            best = (f1, lambda_, w)
-    _, lambda_, w = best
-    return (lambda x: expit(standard(x) @ w[1:] + w[0])), lambda_, history
-
-
 # ---------- Main ----------
 
 
@@ -337,10 +297,9 @@ def parse_args(argv):
     parser.add_argument("--tokenizer", help="default: the same as --model")
     parser.add_argument("--train", nargs="+", required=True, help="training sets, e.g. hipe_fr_train")
     parser.add_argument("--dev", nargs="+", required=True,
-                        help="sets for every choice (epoch, penalty), pooled, e.g. hipe_fr_dev hipe_de_dev")
+                        help="sets for epoch selection, pooled, e.g. hipe_fr_dev hipe_de_dev")
     parser.add_argument("--eval", nargs="*", default=[], help="extra sets to predict (not test sets)")
     parser.add_argument("--final-test", nargs="*", default=[], help="test sets: only for the final evaluation")
-    parser.add_argument("--freeze-encoder", action="store_true", help="probe baseline: frozen mmBERT + logistic regression")
     parser.add_argument("--representation", choices=["mean", "first-subword", "marker"], default="mean",
                         help="mean = lab Option B, first-subword = lab Option A, marker = [[ ]] in the text")
     parser.add_argument("--max-words", type=int, default=64,
@@ -379,8 +338,8 @@ def parse_args(argv):
         parser.error("--supcon-weight must be finite and nonnegative")
     if args.temperature is not None and (not math.isfinite(args.temperature) or args.temperature <= 0):
         parser.error("--temperature must be finite and positive")
-    if args.supcon_weight > 0 and (args.temperature is None or args.freeze_encoder):
-        parser.error("SupCon requires --temperature and full fine-tuning (no --freeze-encoder)")
+    if args.supcon_weight > 0 and args.temperature is None:
+        parser.error("SupCon requires --temperature")
     if any(name.endswith("_test") for name in args.train + args.dev + args.eval):
         parser.error("TEST sets are allowed only through --final-test")
     if set(args.train) & set(args.dev + args.eval + args.final_test):
@@ -391,12 +350,9 @@ def parse_args(argv):
 def default_run_name(args):
     model = Path(args.model.rstrip("/")).name
     train = "+".join(args.train)
-    if args.freeze_encoder:
-        setting = f"probe_{args.representation}"
-    else:
-        setting = f"lr{args.lr:g}_ep{args.epochs}_{args.representation}"
-        if args.schedule != "cosine":
-            setting += f"_{args.schedule}"
+    setting = f"lr{args.lr:g}_ep{args.epochs}_{args.representation}"
+    if args.schedule != "cosine":
+        setting += f"_{args.schedule}"
     setting += f"_w{args.max_words}" if args.max_words is not None else "_wall"
     if args.context == "sentence":
         setting += "_sentence"
@@ -444,9 +400,6 @@ def main(argv=None):
         print(f"tokens {name}: mean {stats['mean']:.0f}, max {stats['max']}, context cut for {stats['context_cut']}")
 
     model = MentionClassifier(args.model, args.representation, args.dropout, args.attn, args.compile).to(device)
-    if args.freeze_encoder:
-        for parameter in model.encoder.parameters():
-            parameter.requires_grad = False
 
     if args.dry_run:
         batch = collate(train_items[: args.batch_size], pad_id, device)
@@ -458,32 +411,22 @@ def main(argv=None):
     reset_peak_memory(device)
     started = time.perf_counter()
     dev_items = [item for name in args.dev for item in encoded[name]]  # choices on all dev sets together
-    dev_labels = np.array([item["label"] for item in dev_items])
     summary = {
-        "system": "encoder-probe" if args.freeze_encoder else "encoder-finetuned",
+        "system": "encoder-finetuned",
         "objective": "ce+supcon" if args.supcon_weight > 0 else "ce",
         "upstream_commit": UPSTREAM_COMMIT,
         "representation": args.representation,
         "context": f"{args.context}, up to {args.max_words} tokens each side",
     }
-    if args.freeze_encoder:
-        train_x = extract_features(model, train_items, args, device, fp16, pad_id)
-        dev_x = extract_features(model, dev_items, args, device, fp16, pad_id)
-        probe, lambda_, history = fit_probe(train_x, np.array([i["label"] for i in train_items]), dev_x, dev_labels)
-        summary.update({"probe_lambda": lambda_, "history": history})
-    else:
-        history, best_epoch = fine_tune(model, train_items, dev_items, args, device, fp16, pad_id)
-        summary.update({"best_epoch": best_epoch, "history": history})
+    history, best_epoch = fine_tune(model, train_items, dev_items, args, device, fp16, pad_id)
+    summary.update({"best_epoch": best_epoch, "history": history})
     synchronize(device)
     summary["train_seconds"] = time.perf_counter() - started
 
     summary["sets"] = {}
     for name, items in encoded.items():
         started = time.perf_counter()
-        if args.freeze_encoder:
-            probabilities = probe(extract_features(model, items, args, device, fp16, pad_id))
-        else:
-            probabilities = predict(model, items, args, device, fp16, pad_id)
+        probabilities = predict(model, items, args, device, fp16, pad_id)
         synchronize(device)
         seconds = time.perf_counter() - started
         labels = np.array([item["label"] for item in items])
@@ -505,8 +448,6 @@ def main(argv=None):
         }
         print(f"{name}: macro-F1 {summary['sets'][name]['macro_f1']:.4f} ({1000 * seconds / len(items):.1f} ms per mention)")
     counts = parameter_counts(model)
-    if args.freeze_encoder:  # only the logistic regression is trained
-        counts["trainable"] = int(train_x.shape[1] + 1)
     summary.update(
         {
             "peak_memory_mb": peak_memory_mb(device),
