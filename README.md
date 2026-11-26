@@ -1,420 +1,234 @@
 # Place-Name Metonymy Classification
 
-This EPFL CS-433 machine learning project studies binary classification of marked
-historical place-name mentions as **LITERAL** (0) or **METONYMIC** (1).
-For example, “The delegation arrived in [TGT] Paris [/TGT].” is literal;
-“[TGT] Paris [/TGT] rejected the agreement.” is metonymic.
-The later research comparison is **standard mmBERT classification vs mmBERT +
-supervised contrastive learning**.
+EPFL CS-433 project: classify supplied historical place-name mentions as
+**LITERAL (0)** or **METONYMIC (1)**. The research comparison is **mmBERT with
+cross-entropy (CE) versus the same mmBERT with CE + supervised contrastive loss**.
+For example, “arrived in Paris” is literal; “Paris rejected the agreement” is
+metonymic.
 
-## Current stage
+The data audit, Group 1 input compatibility, contrastive loss, trainer integration
+and CPU tests are implemented. The server environment and data preparation have
+passed their checks. **This implementation has not yet passed a real mmBERT GPU
+smoke test or produced verified experiment results.**
 
-**Stage 1 — Dataset inspection + majority-class baseline**
-
-The existing `src/metonymy/`, `scripts/`, `tests/`, `data/`, `outputs/`, and
-`notebooks/` scaffold is retained. Data tools remain independent of the optional
-encoder-training dependencies described below.
+The shared workbench now also implements SupCon on its
+[`supcon` branch](https://github.com/impresso/impresso-metonymy-workbench/tree/supcon).
+Consolidation is tracked in [issue #4](https://github.com/MarcK0909/cs433-place-name-metonymy/issues/4):
+retain this branch as a reference while transferring useful tests, data checks,
+and diagnostics into one shared trainer. The local loss PR is on hold.
+The commands below describe this repository's implementation; confirm the shared
+run configuration before launching duplicate experiments.
 
 ## Setup
 
-Python 3.10 or newer is required. Reuse your existing environment or create one:
+Run commands from the repository root. The data tools need Python 3.10+ and the
+base dependencies; the shared encoder environment uses Python 3.12.
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
+# Optional CPU/Mac encoder environment:
+python -m pip install -e '.[encoder]'
 ```
 
-Base dependencies are pandas, scikit-learn, and pytest. Optional `contrastive`
-and `encoder` extras add training dependencies. Run commands from the repository root.
-If dependencies are already installed, the commands below work without an
-editable install by using `PYTHONPATH=src`.
+The base dependencies are pandas, scikit-learn and pytest. The `contrastive`
+extra adds PyTorch; `encoder` pins Group 1's training dependencies. Data inspection
+does not require the encoder extras.
 
-## Data and current availability
-
-The project uses **raw HIPE-2022 v2.1, dataset `hipe2020`**, with **French and
-German** as the main languages. The local source is
-`data/raw/HIPE-2022-data/`, pinned to revision
-`2439cb5cfbcd7b65aff6a25b7715398f8f85e034`. Raw data remain unchanged and gitignored.
-The Batch 2 count audit is described below.
-
-Batch 1 adds `metonymy.hipe.load_hipe_mentions(path, language="fr", split="train")`
-as a separate raw parsing path. It extracts complete `NE-COARSE-LIT` location
-spans, labels all-O aligned METO spans LITERAL and fully aligned contextual
-entities METONYMIC (including loc → loc), and rejects malformed BIO or misaligned
-spans. Returned records preserve document metadata, source rows/line numbers,
-zero-based end-exclusive document token boundaries, and stable IDs. They do not
-yet contain model context `text` and are not inputs to the prepared-data baseline.
-`parse_documents` also exposes all document rows and comments for later inspection.
-Callers must verify the source version and explicitly supply language and split.
-
-Mention reconstruction respects `NoSpaceAfter`. Partial flags are preserved
-verbatim without exclusion or character slicing; `mention` retains the complete
-source-token surface. Nested annotations are retained but never add targets.
-Upstream documentation warns of erroneous Partial offsets. Its statement that
-no training set exists conflicts with the supplied TRAIN filenames; resolve
-split provenance during Batch 2 before experiments.
-
-The prepared-data loader and CLI defaults remain unchanged (including `en`);
-they are not yet adapted to the French/German raw-data workflow. They never
-create splits or mix languages within a run.
-
-### Prepared mention-level input contract
-
-The loader accepts JSON arrays (`.json`), JSON Lines (`.jsonl`), CSV, or TSV.
-Each record represents one target mention and contains:
-
-```json
-{
-  "example_id": "train-en-001",
-  "text": "The delegation arrived in [TGT] Paris [/TGT].",
-  "mention": "Paris",
-  "label": 0,
-  "language": "en",
-  "document_id": "newspaper-001"
-}
-```
-
-Required fields are nonempty string `example_id`, `text`, `mention`, `language`,
-and an explicit label. Labels may be integer 0/1, string "0"/"1", or exact names
-"LITERAL"/"METONYMIC". A `label_name` field may supply the label when `label` is
-absent; when both are present they must agree. Normalized output always contains
-integer `label`, `label_name`, and nullable `document_id`. Additional metadata,
-text, mention spelling, and target markers are preserved verbatim. Missing
-`document_id` becomes null; no target markers, offsets, or labels are inferred.
-Keep target markers or offsets supplied by supervisors so later models can
-identify the intended occurrence when a name repeats in context.
-
-This is a supported input contract, **not a claim about the supervisors’ actual
-schema**. Adapt field mapping after inspecting their files if necessary. Invalid
-records fail baseline loading with a row-level error. Inspection reports them
-without changing source files; statistics explicitly cover valid selected-language
-rows, with total input, invalid, and other-language counts also shown.
-
-Raw HIPE files use the separate `metonymy.hipe` parser described above; the
-prepared-data loader continues to reject token TSV input.
-
-## Commands
-
-Inventory the currently available data (works with empty directories):
+On the EPFL server, create the separate `~/venvs/metonymy-group2` environment:
 
 ```bash
-PYTHONPATH=src python scripts/inspect_data.py --data-dir data
-```
-
-Legacy prepared-data commands (illustrative paths, not the raw HIPE workflow):
-
-```bash
-PYTHONPATH=src python scripts/inspect_data.py --train data/processed/train.jsonl --dev data/processed/dev.jsonl --language en
-PYTHONPATH=src python scripts/run_majority_baseline.py --train data/processed/train.jsonl --dev data/processed/dev.jsonl --language en
-python -m pytest -q
-```
-
-Add `--test data/processed/test.jsonl` to inspection only when an official TEST
-split exists. Final TEST evaluation requires explicit opt-in:
-
-```bash
-PYTHONPATH=src python scripts/run_majority_baseline.py --train data/processed/train.jsonl --test data/processed/test.jsonl --split test --language en
-```
-
-Inspection prints a JSON report with counts and percentages for both classes,
-unique mentions, character-length min/max/mean/median for text and mentions,
-and up to five examples per class sampled with `--seed 433`. It warns about
-invalid/empty fields, unexpected labels, duplicate IDs, exact duplicate content,
-ID overlap across supplied splits, and a class share of at least 90%.
-Duplicates are reported without removal. Duplicate content is defined using
-text, mention, label, language, and document ID, ignoring example ID and extra
-metadata. Split overlap checks use valid selected-language example IDs; these
-checks cannot prove the absence of document-level or semantic leakage.
-
-Baseline results are written to `outputs/baselines/majority_en_dev.json`
-(configurable with `--output-dir`). They include input paths, sizes, majority
-label, tie rule, and all metrics. **Macro-F1** is the main metric; accuracy,
-per-class precision/recall/F1/support, and the confusion matrix are also reported.
-Both classes always participate in Macro-F1, even when absent. Undefined scores
-use `zero_division=0`. Confusion matrix rows are true classes and columns are
-predicted classes, ordered LITERAL, METONYMIC.
-
-## Experimental rules
-
-- TRAIN alone determines the majority class. Ties deterministically select
-  LITERAL (0); every evaluation example receives that class.
-- DEV is used for development and is the default evaluation split.
-- TEST is reserved for final evaluation, never model selection.
-- Empty TRAIN/evaluation data, malformed records, or TRAIN/evaluation ID overlap
-  stop the baseline. No missing split is fabricated, no labels are manually
-  revised, and no raw data are modified.
-
-Before experiments, review the Batch 2 audit findings and confirm split provenance
-and Partial-offset treatment. Batch 1 uses the explicitly supplied target/label rules
-and does not run baseline experiments on raw HIPE data.
-
-## Batch 2 — pinned French/German count audit
-
-```bash
-python scripts/audit_hipe.py
-python -m pytest -q
-HIPE_REAL_DATA_TESTS=1 python -m pytest -q tests/integration/test_hipe_counts.py
-```
-
-The audit reads only the unmasked `train`, `dev`, and `test` TSVs under
-`data/raw/HIPE-2022-data/data/v2.1/hipe2020/{fr,de}/`. It verifies both the checkout
-revision and each file's bytes against that revision. `--data-root` and `--output`
-are configurable; the detailed JSON defaults to ignored
-`outputs/audits/hipe_counts.json`. No splits or source annotations are changed.
-TEST is inspected only for counts, not for model selection or experiments.
-
-| Language | Split | LITERAL | METONYMIC | Total |
-|---|---|---:|---:|---:|
-| fr | train | 2644 | 445 | 3089 |
-| fr | dev | 670 | 104 | 774 |
-| fr | test | 743 | 111 | 854 |
-| de | train | 1415 | 325 | 1740 |
-| de | dev | 501 | 87 | 588 |
-| de | test | 477 | 118 | 595 |
-| combined | train | 4059 | 770 | 4829 |
-| combined | dev | 1171 | 191 | 1362 |
-| combined | test | 1220 | 229 | 1449 |
-
-All workbench counts match **audit candidates**, including two flagged TRAIN
-mentions. Strict extraction remains unchanged and rejects their documents:
-
-- French `GDL-1948-04-15-a-i0035`: token 1461 `France` is `B-loc` with METO `O`;
-  token 1462 `moderne` is the inconsistent `I-org`. Source lines 135786–135787.
-  The flagged candidate `[1461:1462]` is LITERAL by the supplied METO rule.
-- German `luxwort-1938-05-20-a-i0023`: token 26 `Frankreichs` is `B-loc` with
-  METO `B-pers`; tokens `[27:31]` (`größten Außenminister Deleass .`) are
-  inconsistent `I-pers` continuations. Source lines 82459–82463. The flagged
-  candidate `[26:27]` is METONYMIC by the supplied aligned METO rule.
-
-Smallest audit-only handling: explicitly pass a `review_issues` list to
-`extract_mentions`, retain the source `B-loc` span ending before the type change,
-and log the malformed I run without promoting it to a new entity or changing
-any tags. Adjacent candidates retain `annotation_issues`. Default parsing still
-raises. Invalid tags, METO overlap with a malformed run, and span misalignment
-remain errors even in audit mode. Partial examples remain included, with offsets
-unchanged; nested annotations never add targets. Neither known case is Partial.
-
-The JSON separates strict counts from candidate counts and records source rows,
-line numbers, hashes, and review issues. Strict successful-document-only counts
-are fr TRAIN 2639/440 and de TRAIN 1412/320 (LITERAL/METONYMIC); these are incomplete,
-not alternative dataset totals. All DEV/TEST files pass strict extraction.
-Matching counts does not resolve the malformed annotations: manually review both
-flagged candidates before adopting an experimental inclusion policy. The audit
-writes no model-ready dataset and does not alter baseline behavior.
-
-## Contrastive batch 1 — isolated loss, no training yet
-
-`src/metonymy/contrastive.py` implements `supervised_contrastive_loss` on a
-batch of pooled mention vectors and integer binary labels. It is independent
-of mmBERT and the data parser. The four steps in the code are:
-
-1. Identify other mentions with the same label (positive pairs).
-2. Normalize vectors to unit length and compute cosine similarities divided
-   by an explicit temperature.
-3. Compute log probabilities over all other mentions, excluding self-pairs.
-4. Average negative log probabilities over positives, then over anchors with
-   at least one positive.
-
-An anchor without a positive is omitted from this average; it can still be a
-negative comparison for other anchors. With no positive pairs anywhere, the
-loss is differentiable zero. No mentions are removed from the classification
-task. A single-class batch is allowed, although it supplies no negative pairs.
-No projection head, extra views, sampler changes, or model downloads are added.
-
-Batch 2 below integrates `CE + lambda * SupCon`, keeping the classifier's
-original pooled vectors and normalizing only for SupCon. Temperature and lambda
-are not selected by this batch. Compute the loss outside mixed-precision
-autocast; half-precision feature inputs are promoted to float32 internally.
-
-PyTorch is optional for the existing data pipeline. The `contrastive` extra pins
-`torch==2.9.1` to Group 1's version; the GPU build will be installed explicitly
-when setting up the server. Synthetic loss tests run with installed PyTorch
-and skip when it is absent:
-
-```bash
-python -m pytest -q tests/test_contrastive.py
-python -m pytest -q
-```
-
-These tests check a hand-computed loss, label separation, normalization,
-singleton/empty-positive behavior, numerical gradients, and invalid inputs.
-They require neither a pretrained model nor the real dataset.
-
-## Contrastive batch 2 — shared trainer integration
-
-`python scripts/train_encoder.py` runs the Group 1 encoder adapted from commit
-`d5234ba3110b55101111685e0df9da521ba2c0d7`. Reused code, its AGPL-3.0 license,
-and the modification record live in `src/metonymy/group1/`. No LLM pipeline or
-upstream experimental artifacts are copied. Existing prepared-data and strict
-HIPE loaders remain unchanged.
-
-The central addition is `training_loss` in `group1/train_encoder.py`:
-
-```python
-features = model.features(batch)             # one encoder forward
-logits = model.head(model.dropout(features)) # original classification path
-loss = CE(logits, labels) + weight * SupCon(features, labels)
-```
-
-With `--supcon-weight 0` (the default), the code instead calls the original
-`model(batch)` and computes CE only. No SupCon calculation occurs. The same
-mention pooling, context/tokenization, shuffled batches, AdamW schedule,
-clipping, and pooled-DEV checkpoint selection are retained. Positive weights
-require an explicit `--temperature`; no lambda or temperature has been selected
-for the research experiment. Every epoch logs CE, unweighted and weighted
-SupCon, and counts of anchors with/without positive partners. Run names separate
-CE and SupCon configurations. Configuration records include the upstream commit.
-
-### Input and commands
-
-The trainer consumes **Group 1 prepared JSONL**, not raw HIPE TSV or the older
-`text`/`mention` loader schema. Each row needs `id`, `tokens`, `start`, `end`,
-`label`, and HIPE `space_after` flags. Start/end are local token offsets into
-that row's context. Use Group 1's shared mention IDs and preparation rules.
-Batch 3 below provides the raw-to-prepared bridge and full file-checksum parity
-check. Batch 2 itself did not generate model-ready HIPE files.
-
-Once prepared files and the encoder environment exist, these are the command
-shapes (not instructions to start a full run yet):
-
-```bash
-# Original CE path; defaults match Group 1's 64-token, batch-32 setup.
-python scripts/train_encoder.py --train hipe_fr_train hipe_de_train --dev hipe_fr_dev hipe_de_dev --data-dir data/processed/group1 --device cuda --supcon-weight 0
-
-# CE+SupCon: replace WEIGHT and TEMPERATURE with explicitly selected pilot values.
-python scripts/train_encoder.py --train hipe_fr_train hipe_de_train --dev hipe_fr_dev hipe_de_dev --data-dir data/processed/group1 --device cuda --supcon-weight WEIGHT --temperature TEMPERATURE
-```
-
-Select an allocated GPU with `CUDA_DEVICE_ORDER=PCI_BUS_ID` and
-`CUDA_VISIBLE_DEVICES=...` before CUDA commands. Never use GPU 3. Do not assume
-GPU 1 is free: its availability and service assignments have changed. TEST is
-not loaded by these commands; filenames ending `_test` are rejected outside
-`--final-test`. Generated results default to ignored `outputs/runs/`.
-
-The optional `encoder` dependency group pins Group 1's PyTorch, Transformers,
-NumPy and SciPy versions. On a CPU/Mac environment use `pip install -e '.[encoder]'`;
-server CUDA installation is a separate setup step. Do not change the default
-project environment solely to run data inspection.
-
-### CPU validation
-
-```bash
-HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python -m pytest -q tests/test_encoder.py
-python -m pytest -q
-```
-
-The encoder tests require PyTorch and Transformers and skip when unavailable.
-They use a tiny random BERT and a local synthetic tokenizer, with no pretrained
-model downloads. A pinned copy of Group 1's original CE loop is retained only
-as a test oracle: the adapted zero-weight loop must match its loss, DEV score,
-and selected parameters exactly on CPU. Other tests check combined-loss
-arithmetic, encoder gradients, single-forward behavior, input alignment,
-configuration validation, and saved prediction/metric files.
-
-These checks establish code integration, not real mmBERT performance or CUDA
-compatibility. No GPU job, real-data training, or model download has run.
-
-## Contrastive batch 3 — prepared inputs matching Group 1
-
-```bash
-python scripts/prepare_encoder_data.py
-# Optional real-data assertions (also checks the earlier audit):
-HIPE_REAL_DATA_TESTS=1 python -m pytest -q tests/integration
-```
-
-This writes only the French/German TRAIN and DEV files into
-`data/processed/group1/` (gitignored). Use `--data-root` and `--output-dir` to
-change paths. Existing outputs require explicit `--overwrite`; raw inputs are
-never modified. There is no TEST or English preparation in this command.
-
-Before writing, it verifies the HIPE checkout and source bytes against revision
-`2439cb5cfbcd7b65aff6a25b7715398f8f85e034`, checks each target's source boundaries
-and label against our parser, checks counts and unique IDs, and checks the full
-prepared-file MD5 against Group 1's recorded CE-run configuration. All four files
-match: 3,089 French TRAIN, 1,740 German TRAIN, 774 French DEV, 588 German DEV.
-That is **6,191 prepared examples**, with the two agreed TRAIN cases and all
-Partial mentions included. A new malformed annotation stops preparation.
-
-Group 1's schema keeps up to 128 source tokens on each side in the prepared
-file; the shared trainer then uses up to **64 per side**. No context experiment
-or tokenizer change is introduced. Mention IDs, token arrays, spacing flags,
-local and document offsets, labels, notes and row order match the reference
-serialization. Source and prepared hashes, counts, and reviewed-target IDs are
-recorded in `data/processed/group1/preparation_report.json`.
-
-`src/metonymy/group1/data_reference.json` pins the expected checksums to the
-upstream seed-42, 64-token run config at commit `d5234ba`. Matching these files
-establishes input parity, not reproduction of model scores. This batch runs no
-training or model download. The next step is the server environment and a short
-GPU smoke test once a GPU is allocated.
-
-## Server setup and one-step smoke test
-
-The setup script targets Group 1's Python 3.12 / PyTorch 2.9.1 CUDA 12.6 stack.
-It creates a separate `~/venvs/metonymy-group2` environment, installs this project
-and its pinned encoder dependencies, and runs the CPU tests offline. It does
-not download model weights or start GPU work. Override the environment location
-with `METONYMY_VENV` or Python executable with `METONYMY_PYTHON` if needed.
-
-To copy this batch from the Mac without checking out the branch, run from the
-repository root (only the named code/documentation paths are sent):
-
-```bash
-rsync -av --exclude '__pycache__' --exclude '*.egg-info' src scripts tests server pyproject.toml README.md kallergi@dhlabsrv1.epfl.ch:~/metonymy-group2-smoke/
-```
-
-On the server:
-
-```bash
-cd ~/metonymy-group2-smoke
 METONYMY_PYTHON=python3.12 bash server/setup_env.sh \
   && source ~/venvs/metonymy-group2/bin/activate
 ```
 
-Use the existing pinned HIPE checkout if it is already on the server, passing
-its path to `--data-root`. Otherwise obtain a separate copy once:
+The server's default `python3` may be 3.13: select `python3.12` explicitly.
+The script installs PyTorch 2.9.1 with CUDA 12.6 and runs CPU tests offline. It
+starts no GPU job and downloads no model weights. `METONYMY_VENV` can override
+the environment directory.
+
+## Data preparation and audit
+
+Use **HIPE-2022 v2.1, dataset `hipe2020`, French and German**, pinned to commit
+`2439cb5cfbcd7b65aff6a25b7715398f8f85e034`. Keep raw files unchanged. Datasets,
+prepared files, checkpoints and generated outputs are gitignored.
+
+If the checkout is not already available:
 
 ```bash
 mkdir -p data/raw
 git clone https://github.com/hipe-eval/HIPE-2022-data.git data/raw/HIPE-2022-data
 git -C data/raw/HIPE-2022-data checkout 2439cb5cfbcd7b65aff6a25b7715398f8f85e034
+```
+
+```bash
+python scripts/audit_hipe.py
 python scripts/prepare_encoder_data.py
 ```
 
-Wait for a GPU allocation from the lab, and check `nvidia-smi` immediately before
-launching. GPU 1 is not assumed available. GPU 3 is reserved for services.
-After replacing `G` below with the allocated index (0, 1 or 2):
+Both commands accept `--data-root`. The audit checks six unmasked FR/DE splits
+and writes `outputs/audits/hipe_counts.json`. Preparation reads **TRAIN and DEV
+only**, writing four JSONL files and `preparation_report.json` under
+`data/processed/group1/`. Use `--output-dir` to change that destination; replacing
+existing prepared files requires `--overwrite`.
+
+Preparation verifies the source revision and raw bytes, source mention/label
+agreement with our parser, unique IDs, counts, and complete prepared-file MD5s
+against Group 1's recorded CE run. All four prepared checksums match, covering
+**4,829 TRAIN and 1,362 DEV examples**. A new malformed annotation stops preparation.
+The expected checksums and upstream reference are in
+`src/metonymy/group1/data_reference.json`.
+
+| Language | Split | LITERAL | METONYMIC | Total |
+|---|---|---:|---:|---:|
+| French | TRAIN | 2644 | 445 | 3089 |
+| French | DEV | 670 | 104 | 774 |
+| French | TEST | 743 | 111 | 854 |
+| German | TRAIN | 1415 | 325 | 1740 |
+| German | DEV | 501 | 87 | 588 |
+| German | TEST | 477 | 118 | 595 |
+
+### Annotation rules and reviewed cases
+
+Targets are complete `B-loc`/`I-loc` spans in `NE-COARSE-LIT`. Aligned METO tags
+all equal to `O` mean LITERAL; one exactly aligned contextual entity means
+METONYMIC, including **loc → loc**. Nested annotations never add targets.
+Partial flags are retained without exclusion or character slicing. Mention
+reconstruction respects `NoSpaceAfter` and keeps OCR/source-token spelling.
+
+`metonymy.hipe` is the strict parser. It rejects malformed BIO, invalid tags and
+misalignment. An explicit `review_issues` list enables audit candidates without
+promoting orphan I runs to new entities. The shared-data bridge keeps the two
+agreed TRAIN targets, matching Group 1:
+
+- `GDL-1948-04-15-a-i0035`: `France` at `[1461:1462]`, LITERAL; followed by
+  inconsistent `moderne / I-org`. Source lines 135786–135787.
+- `luxwort-1938-05-20-a-i0023`: `Frankreichs` at `[26:27]`, METONYMIC; followed
+  by inconsistent `I-pers` tokens at `[27:31]`. Source lines 82459–82463.
+
+Offsets above are zero-based, document-relative, end-exclusive. These cases
+remain flagged in the audit and prepared notes; neither is Partial. Strict
+successful-document-only TRAIN counts are 2639/440 (FR) and 1412/320 (DE),
+which omit the entire affected documents and are not dataset totals. All
+DEV/TEST documents pass strict extraction. Group 1's in-memory BIO repair and
+our audited extraction give the same supplied location targets; raw files are
+never edited. Upstream documentation also warns of incorrect Partial offsets.
+
+The encoder consumes Group 1's schema: `id`, `tokens`, `space_after`, `start`,
+`end`, `label`, plus provenance. Prepared files keep up to 128 source tokens on
+each side; the shared trainer uses **64 per side**, within document boundaries,
+and at most 512 subwords. Checksums cover metadata, row order and serialization
+as well as inputs and labels.
+
+## Shared encoder and contrastive objective
+
+The encoder code is adapted from Group 1 commit
+`d5234ba3110b55101111685e0df9da521ba2c0d7`. Attribution, the retained AGPL-3.0
+license and local changes are in `src/metonymy/group1/NOTICE.md` and `LICENSE`.
+
+| Setting | Shared baseline |
+|---|---|
+| Model | `jhu-clsp/mmBERT-base`, full fine-tuning |
+| Representation | Mean of target-mention subwords; dropout 0.1 and linear head |
+| Training data | French + German TRAIN |
+| Optimizer | AdamW, LR 5e-5, weight decay 0; cosine decay, 10% warm-up |
+| Batch / duration | 32; up to 20 epochs, patience 6; gradient clipping 1.0 |
+| Selection | Pooled French/German DEV Macro-F1; prediction threshold 0.5 |
+| Seeds | 42, 123, 456, 789, 2025 |
+
+The optional objective is `CE + lambda * SupCon`. SupCon normalizes a copy of
+the pooled vectors, uses same-label positives and opposite-label negatives
+within the existing batch, and excludes self-pairs. It averages positive log
+probabilities per anchor, then averages over anchors with a positive. An anchor
+without a positive has no own SupCon term but may remain a negative for others;
+its CE is retained. With no positive pairs, SupCon returns differentiable zero.
+A single-class batch supplies no negatives. There is no projection head, extra
+view or new sampler.
+
+`--supcon-weight 0` uses the original CE forward without calling SupCon. Positive
+weights require `--temperature`. The encoder runs once per batch; the classifier
+uses the original vectors. Loss computation is outside autocast, with float32
+features for SupCon. Logs record both losses and positive-partner coverage.
+Frozen-encoder probing is not part of this implementation.
+
+## GPU smoke test and training
+
+Use a GPU allocated by the lab, and check `nvidia-smi` immediately before launch.
+**Never use GPU 3.** Do not assume GPU 1 is available: it has hosted services.
+Replace `G` with an allocated index (0, 1 or 2), then run the smoke tests sequentially:
 
 ```bash
 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=G python scripts/smoke_encoder.py --device cuda --supcon-weight 0 --output outputs/smoke/ce.json
 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=G python scripts/smoke_encoder.py --device cuda --supcon-weight 0.1 --temperature 0.1 --output outputs/smoke/supcon.json
 ```
 
-`0.1` here is a diagnostic value, not a selected experimental hyperparameter.
-Both commands use the same seeded random TRAIN sample (32 mentions), the shared
-64-token context rule, and one optimizer update. A missing class/positive
-partner in the sample is an explicit error, not silently repaired by sampling.
-The first run downloads mmBERT/tokenizer if uncached. `--model` can instead point
-to a local model directory. `--batch-size 4` is available for an explicitly
-smaller memory diagnostic, but may lack positive partners with this seed.
-
-The smoke checks loss, gradients, and an actual classifier update. It writes
-sample IDs, component losses, data hashes, resolved model revision when exposed
-by Transformers, timing, versions and memory usage. It writes no checkpoint,
-evaluates neither DEV nor TEST, and refuses to overwrite an existing report.
+These use the same seeded 32-mention TRAIN sample and perform one optimizer
+update. `0.1` is a diagnostic value, not a selected hyperparameter. The first
+run downloads mmBERT/tokenizer if uncached; `--model` accepts a local directory.
+The smoke test checks finite/nonzero gradients and a classifier update. It
+writes IDs, losses, hashes, model revision when available, versions, timing and
+memory; no checkpoint or DEV/TEST evaluation. Existing reports are not overwritten.
 Nonfinite fp16 gradients stop the test; `--no-fp16` is available for diagnosis.
 
-This is not yet a full training experiment. Confirm Group 1's model revision
-before comparing full runs. The rsynced smoke directory has no Git metadata;
-use a committed Git checkout for the later recorded experiments. Run commands
-sequentially, report their outputs, and wait to launch a multi-seed experiment.
+After the smoke tests pass and pilot settings are agreed, training commands are:
+
+```bash
+# CE control
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=G python scripts/train_encoder.py --train hipe_fr_train hipe_de_train --dev hipe_fr_dev hipe_de_dev --data-dir data/processed/group1 --device cuda --supcon-weight 0 --save-model
+# Replace WEIGHT and TEMPERATURE with the selected pilot settings.
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=G python scripts/train_encoder.py --train hipe_fr_train hipe_de_train --dev hipe_fr_dev hipe_de_dev --data-dir data/processed/group1 --device cuda --supcon-weight WEIGHT --temperature TEMPERATURE --save-model
+```
+
+Outputs go to `outputs/runs/`: configuration, per-epoch metrics and predictions
+keyed by mention ID, plus weights with `--save-model`. Confirm Group 1's base-model
+revision before comparing full runs. Use a committed Git checkout for recorded
+experiments; an rsynced directory without `.git` cannot record the code commit.
+
+Use TRAIN for learning and pairs, DEV for all decisions, and TEST only for the
+frozen final evaluation. No splits are invented or merged. TEST filenames are
+rejected outside `--final-test`; the preparation command does not export TEST.
+Emphasize Macro-F1 and per-class results, report French/German separately, and
+compare repeated seeds before interpreting gains. If sampling or views change,
+include a CE control with the same change.
+
+## Tests
+
+```bash
+python -m pytest -q
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python -m pytest -q tests/test_encoder.py
+HIPE_REAL_DATA_TESTS=1 CUDA_VISIBLE_DEVICES="" python -m pytest -q tests/integration
+```
+
+Ordinary tests use synthetic fixtures, tiny random models and local tokenizers;
+no pretrained-model downloads. Optional loss/encoder tests skip if their
+packages are absent. Real-data tests are separate and opt-in. The retained
+Group 1 CE-loop fixture verifies exact CPU loss/selected-weight parity when
+lambda is zero; numerical checks validate the contrastive gradients.
+
+## Earlier inspection and majority-baseline tools
+
+These remain available for separately prepared mention-level JSON/JSONL/CSV/TSV:
+
+```bash
+PYTHONPATH=src python scripts/inspect_data.py --data-dir data
+PYTHONPATH=src python scripts/inspect_data.py --train TRAIN.jsonl --dev DEV.jsonl --language fr
+PYTHONPATH=src python scripts/run_majority_baseline.py --train TRAIN.jsonl --dev DEV.jsonl --language fr
+```
+
+Their schema uses nonempty `example_id`, `text`, `mention`, `language`, binary
+`label` (0/1 or LITERAL/METONYMIC), and optional `document_id`/`label_name`.
+Extra metadata and text are preserved. This differs from the encoder schema;
+raw HIPE requires the HIPE-specific parser. Inspection reports invalid rows,
+duplicates, ID overlap, class balance, lengths and seeded samples without
+editing data. The majority label uses TRAIN only; ties select LITERAL. DEV is
+the default evaluation, with fixed two-class metrics (`zero_division=0`) and
+confusion-matrix rows=true, columns=predicted. Results go to `outputs/baselines/`.
 
 ## Next steps
 
-1. Standard mmBERT + cross-entropy baseline.
-2. Supervised contrastive objective.
-3. Controlled CE vs CE+SupCon comparison.
-4. Representation analysis.
-5. Error analysis.
-6. Optional auxiliary datasets / multilingual extensions.
+1. Complete the allocated-GPU smoke tests and resolve base-model revision parity.
+2. Run a small CE+SupCon pilot; choose weight/temperature on DEV.
+3. Compare CE and CE+SupCon under matched settings across repeated seeds.
+4. Perform representation and error analysis, then frozen TEST evaluation.
+5. Consider auxiliary datasets or multilingual extensions only as separate work.
